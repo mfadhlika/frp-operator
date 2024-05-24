@@ -1,0 +1,12 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: frp-operator
+subjects:
+  - kind: ServiceAccount
+    name: frp-operator
+    namespace: frp-operator-system
+roleRef:
+  kind: ClusterRole
+  name: frp-operator
+  apiGroup: rbac.authorization.k8s.io

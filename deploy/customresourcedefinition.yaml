@@ -1,0 +1,57 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clients.frp-operator.io
+spec:
+  group: frp-operator.io
+  names:
+    categories: []
+    kind: Client
+    plural: clients
+    shortNames: []
+    singular: client
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for ClientSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              auth:
+                nullable: true
+                properties:
+                  secret:
+                    nullable: true
+                    type: string
+                  token:
+                    nullable: true
+                    type: string
+                type: object
+              serverAddr:
+                type: string
+              serverPort:
+                format: uint16
+                minimum: 0.0
+                type: integer
+              webserverAddr:
+                nullable: true
+                type: string
+              webserverPort:
+                format: uint16
+                minimum: 0.0
+                nullable: true
+                type: integer
+            required:
+            - serverAddr
+            - serverPort
+            type: object
+        required:
+        - spec
+        title: Client
+        type: object
+    served: true
+    storage: true
+    subresources: {}
