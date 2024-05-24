@@ -251,7 +251,8 @@ async fn reconcile(obj: Arc<Ingress>, ctx: Arc<Context>) -> Result<Action, Error
         return Ok(Action::requeue(Duration::from_secs(60)));
     }
 
-    let ing_name = obj.name_any().to_owned();
+    let obj_name = obj.name_any().to_owned();
+    let obj_spec = obj.spec.to_owned();
 
     let client = ctx.client.clone();
 
@@ -349,7 +350,7 @@ async fn reconcile(obj: Arc<Ingress>, ctx: Arc<Context>) -> Result<Action, Error
                     )
                     .await?;
 
-                let mut ing = ingress_api.get_status(&ing_name).await?;
+                let mut ing = ingress_api.get_status(&obj_name).await?;
                 ing.status = Some(IngressStatus {
                     load_balancer: Some(IngressLoadBalancerStatus {
                         ingress: Some(vec![IngressLoadBalancerIngress {
@@ -367,52 +368,70 @@ async fn reconcile(obj: Arc<Ingress>, ctx: Arc<Context>) -> Result<Action, Error
 
                 ingress_api
                     .patch_status(
-                        &ing_name,
+                        &obj_name,
                         &PatchParams::apply(OPERATOR_MANAGER),
                         &Patch::Merge(ing),
                     )
                     .await?;
             }
             finalizer::Event::Cleanup(_ing) => {
-                let spec = dep.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+                // look for orphaned resources
+                let pod_spec = dep
+                    .spec
+                    .as_ref()
+                    .and_then(|spec| spec.template.spec.as_ref())
+                    .unwrap();
 
-                let mut patch = vec![];
-                let volume_mounts = spec
+                let mut patches = vec![];
+                // find volume related to the ingress being cleanup
+                if let Some(index) = pod_spec
                     .containers
                     .get(0)
-                    .unwrap()
-                    .volume_mounts
-                    .as_ref()
-                    .unwrap();
-                if let Some(index) = volume_mounts.iter().position(|vol| vol.name == name) {
-                    patch.push(PatchOperation::Remove(RemoveOperation {
+                    .and_then(|c| c.volume_mounts.as_ref())
+                    .and_then(|vms| vms.iter().position(|vol| vol.name == name))
+                {
+                    patches.push(PatchOperation::Remove(RemoveOperation {
                         path: format!("/spec/template/spec/volumes/{index}"),
                     }));
                 }
 
-                if let Some(index) = spec
+                // find volume mount related to the ingress being cleanup
+                if let Some(index) = pod_spec
                     .volumes
                     .as_ref()
-                    .unwrap()
-                    .iter()
-                    .position(|vol| vol.name == name)
+                    .and_then(|vols| vols.iter().position(|vol| vol.name == name))
                 {
-                    patch.push(PatchOperation::Remove(RemoveOperation {
+                    patches.push(PatchOperation::Remove(RemoveOperation {
                         path: format!("/spec/template/spec/containers/0/volumeMounts/{index}"),
                     }));
                 }
 
+                // patch deployment
                 deploy_api
                     .patch(
                         "frpc",
                         &PatchParams::default(),
-                        &Patch::Json::<()>(json_patch::Patch(patch)),
+                        &Patch::Json::<()>(json_patch::Patch(patches)),
                     )
                     .await?;
 
+                // delete config map for the ingress
                 configmap_api
                     .delete(&cm_name, &DeleteParams::default())
                     .await?;
+
+                // delete secrets for the ingress
+                for secret_name in obj_spec
+                    .as_ref()
+                    .and_then(|spec| spec.tls.as_ref())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|tls| tls.secret_name.as_ref())
+                {
+                    secret_api
+                        .delete(secret_name, &DeleteParams::default())
+                        .await?;
+                }
             }
         }
 
