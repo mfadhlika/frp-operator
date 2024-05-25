@@ -1,31 +1,21 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures_util::StreamExt;
-use json_patch::{PatchOperation, RemoveOperation, ReplaceOperation};
-use k8s_openapi::{
-    api::{
-        apps::v1::Deployment,
-        core::v1::{
-            ConfigMap, ConfigMapVolumeSource, Secret, SecretVolumeSource, Service, Volume,
-            VolumeMount,
-        },
-        networking::v1::{
-            Ingress, IngressLoadBalancerIngress, IngressLoadBalancerStatus, IngressPortStatus,
-            IngressStatus,
-        },
+use json_patch::{PatchOperation, RemoveOperation};
+use k8s_openapi::api::{
+    apps::v1::Deployment,
+    core::v1::{ConfigMap, Secret, Service},
+    networking::v1::{
+        Ingress, IngressLoadBalancerIngress, IngressLoadBalancerStatus, IngressPortStatus,
+        IngressStatus,
     },
-    apimachinery::pkg::apis::meta::v1::OwnerReference,
 };
 use kube::{
     api::{DeleteParams, ListParams, ObjectMeta, Patch, PatchParams},
     runtime::{controller::Action, finalizer, reflector, watcher, Controller, WatchStreamExt},
     Api, ResourceExt,
 };
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 
 use crate::{
     config::{Proxy, ProxyConfig, ProxyPlugin},
@@ -35,7 +25,7 @@ use crate::{
 };
 use anyhow::anyhow;
 
-use super::client::Client;
+use super::{client::Client, configmap_from_proxy, patch_deployment, volumes_from_proxy};
 
 pub const INGRESS_FINALIZER: &str = "frp-operator.io/ingress-finalizer";
 
@@ -45,7 +35,7 @@ pub async fn proxy_from_ingress(
     secrets: &mut Vec<Secret>,
 ) -> Result<ProxyConfig, Error> {
     let mut proxy_config = ProxyConfig {
-        name: ing.metadata.name.as_ref().unwrap().to_owned(),
+        name: ing.name_any(),
         ..ProxyConfig::default()
     };
 
@@ -92,7 +82,7 @@ pub async fn proxy_from_ingress(
             let locations = path.path.as_ref().map(|p| vec![p.to_owned()]);
 
             proxy_config.proxies.push(Proxy {
-                name: ing.metadata.name.as_ref().unwrap().to_owned(),
+                name: ing.name_any(),
                 type_: "http".to_string(),
                 local_ip: Some(hostname),
                 local_port: Some(port),
@@ -122,11 +112,11 @@ pub async fn proxy_from_ingress(
                 proxy.type_ = "https".to_string();
                 proxy.plugin = Some(ProxyPlugin {
                     type_: "https2http".to_string(),
-                    local_addr: Some(format!(
-                        "{}:{}",
-                        proxy.local_ip.clone().unwrap(),
-                        proxy.local_port.unwrap()
-                    )),
+                    local_addr: proxy
+                        .local_ip
+                        .as_ref()
+                        .zip(proxy.local_port)
+                        .map(|(ip, port)| format!("{ip}:{port}")),
                     crt_path: Some(format!("/etc/frp/certs/{secret_name}/tls.crt")),
                     key_path: Some(format!("/etc/frp/certs/{secret_name}/tls.key")),
                     secret_name: Some(secret_name.to_owned()),
@@ -141,99 +131,6 @@ pub async fn proxy_from_ingress(
     }
 
     Ok(proxy_config)
-}
-
-pub fn configmap_from_proxy(
-    oref: &OwnerReference,
-    proxy: &ProxyConfig,
-    ns: &str,
-) -> Result<ConfigMap, Error> {
-    let name = format!("config-proxy-{}", proxy.name);
-    let filename = format!("proxy-{}.toml", proxy.name);
-    let proxy_config = toml::to_string_pretty(&proxy)
-        .map_err(|err| anyhow!("failed to serialize proxy config: {err}"))?;
-
-    debug!("config:\n{}", proxy_config);
-
-    let mut data = BTreeMap::new();
-    data.insert(filename.to_owned(), proxy_config);
-
-    Ok(ConfigMap {
-        metadata: ObjectMeta {
-            name: Some(format!("frpc-{name}")),
-            namespace: Some(ns.to_owned()),
-            owner_references: Some(vec![oref.clone()]),
-            ..ObjectMeta::default()
-        },
-        data: Some(data),
-        ..ConfigMap::default()
-    })
-}
-
-pub async fn volumes_from_proxy(
-    proxy: &ProxyConfig,
-    volumes: &mut Vec<Volume>,
-    volume_mounts: &mut Vec<VolumeMount>,
-) {
-    let name = format!("config-proxy-{}", proxy.name);
-    let filename = format!("proxy-{}.toml", proxy.name);
-
-    if volumes.iter().find(|v| v.name == name).is_none() {
-        volumes.push(Volume {
-            name: name.to_owned(),
-            config_map: Some(ConfigMapVolumeSource {
-                name: Some(format!("frpc-{name}")),
-                ..ConfigMapVolumeSource::default()
-            }),
-            ..Volume::default()
-        });
-    }
-
-    if volume_mounts.iter().find(|v| v.name == name).is_none() {
-        volume_mounts.push(VolumeMount {
-            name: name.clone(),
-            mount_path: format!("/etc/frp/{filename}"),
-            sub_path: Some(filename.to_owned()),
-            read_only: Some(true),
-            ..VolumeMount::default()
-        });
-    }
-
-    for (proxy_name, plugin) in proxy
-        .proxies
-        .iter()
-        .filter_map(|p| p.plugin.as_ref().map(|plugin| (p.name.as_str(), plugin)))
-    {
-        let Some(secret_name) = plugin.secret_name.as_ref() else {
-            continue;
-        };
-
-        let cert_name = format!("certs-{proxy_name}");
-
-        if volumes.iter().find(|v| v.name == cert_name).is_some() {
-            continue;
-        }
-
-        volumes.push(Volume {
-            name: cert_name.to_owned(),
-            secret: Some(SecretVolumeSource {
-                secret_name: Some(secret_name.clone()),
-                ..SecretVolumeSource::default()
-            }),
-            ..Volume::default()
-        });
-
-        if volume_mounts.iter().find(|v| v.name == cert_name).is_some() {
-            continue;
-        }
-
-        volume_mounts.push(VolumeMount {
-            name: cert_name.to_owned(),
-            mount_path: format!("/etc/frp/certs/{secret_name}"),
-            read_only: Some(true),
-            ..VolumeMount::default()
-        });
-    }
 }
 
 async fn reconcile(obj: Arc<Ingress>, ctx: Arc<Context>) -> Result<Action, Error> {
@@ -264,19 +161,19 @@ async fn reconcile(obj: Arc<Ingress>, ctx: Arc<Context>) -> Result<Action, Error
         .nth(0)
         .ok_or_else(|| anyhow!("no client found"))?;
 
-    let cli_ns = cli.namespace().clone().unwrap_or("default".to_string());
+    let cli_ns = cli.namespace().unwrap_or("default".to_string());
     let configmap_api: Api<ConfigMap> = Api::namespaced(client.clone(), &cli_ns);
 
-    let obj_ns = obj.namespace().clone().unwrap_or("default".to_string());
+    let obj_ns = obj.namespace().unwrap_or("default".to_string());
 
-    let name = format!("config-proxy-{}", obj.metadata.name.as_ref().unwrap());
+    let name = format!("config-proxy-{}", obj.name_any());
     let cm_name = format!("frpc-{name}");
 
     let ingress_api: Api<Ingress> = Api::namespaced(client.clone(), &obj_ns);
     let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &cli_ns);
     let secret_api: Api<Secret> = Api::namespaced(client.clone(), &cli_ns);
 
-    let dep = deploy_api.get("frpc").await?;
+    let dep: Deployment = deploy_api.get("frpc").await?;
 
     finalizer(&ingress_api, INGRESS_FINALIZER, obj, |event| async {
         match event {
@@ -299,7 +196,7 @@ async fn reconcile(obj: Arc<Ingress>, ctx: Arc<Context>) -> Result<Action, Error
                     };
                     secret_api
                         .patch(
-                            secret.metadata.name.as_ref().unwrap(),
+                            secret.name_any().as_str(),
                             &PatchParams::apply(OPERATOR_MANAGER),
                             &Patch::Apply(secret.to_owned()),
                         )
@@ -328,27 +225,9 @@ async fn reconcile(obj: Arc<Ingress>, ctx: Arc<Context>) -> Result<Action, Error
                     .and_then(|c| c.volume_mounts.clone())
                     .unwrap_or(vec![]);
 
-                volumes_from_proxy(&proxy, &mut volumes, &mut volume_mounts).await;
+                volumes_from_proxy(&proxy, &mut volumes, &mut volume_mounts);
 
-                let patch = json_patch::Patch(vec![
-                    PatchOperation::Replace(ReplaceOperation {
-                        path: "/spec/template/spec/volumes".to_string(),
-                        value: serde_json::to_value(volumes).map_err(|err| anyhow!("{err}"))?,
-                    }),
-                    PatchOperation::Replace(ReplaceOperation {
-                        path: "/spec/template/spec/containers/0/volumeMounts".to_string(),
-                        value: serde_json::to_value(volume_mounts)
-                            .map_err(|err| anyhow!("{err}"))?,
-                    }),
-                ]);
-
-                deploy_api
-                    .patch(
-                        "frpc",
-                        &PatchParams::apply(OPERATOR_MANAGER),
-                        &Patch::Json::<()>(patch),
-                    )
-                    .await?;
+                patch_deployment(&deploy_api, &volumes, &volume_mounts).await?;
 
                 let mut ing = ingress_api.get_status(&obj_name).await?;
                 ing.status = Some(IngressStatus {

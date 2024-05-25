@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct LoadBalancer {
+    pub group: String,
+    pub group_key: String,
+}
+
+#[derive(Default, Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Proxy {
     pub name: String,
     #[serde(rename = "type")]
@@ -13,6 +20,7 @@ pub struct Proxy {
     pub custom_domains: Option<Vec<String>>,
     pub locations: Option<Vec<String>>,
     pub plugin: Option<ProxyPlugin>,
+    pub load_balancer: Option<LoadBalancer>,
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize, JsonSchema)]
