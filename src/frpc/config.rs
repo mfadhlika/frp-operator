@@ -1,14 +1,13 @@
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Default, Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadBalancer {
     pub group: String,
     pub group_key: String,
 }
 
-#[derive(Default, Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Proxy {
     pub name: String,
@@ -21,46 +20,47 @@ pub struct Proxy {
     pub locations: Option<Vec<String>>,
     pub plugin: Option<ProxyPlugin>,
     pub load_balancer: Option<LoadBalancer>,
+    pub transport: Option<ProxyTransport>,
 }
 
-#[derive(Default, Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Auth {
     pub method: String,
     pub token: Option<String>,
 }
 
-#[derive(Default, Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WebServer {
     pub addr: Option<String>,
     pub port: u16,
 }
 
-#[derive(Default, Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientConfig {
     pub server_addr: String,
     pub server_port: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<Auth>,
     pub webserver: Option<WebServer>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default = "Vec::new")]
     pub proxies: Vec<Proxy>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default = "Vec::new")]
     pub includes: Vec<String>,
+    pub transport: Option<Transport>,
 }
 
-#[derive(Default, Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyConfig {
     #[serde(skip)]
     pub name: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default = "Vec::new")]
     pub proxies: Vec<Proxy>,
 }
 
-#[derive(Default, Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyPlugin {
     #[serde(rename = "type")]
@@ -71,4 +71,16 @@ pub struct ProxyPlugin {
     pub host_header_rewrite: Option<String>,
     #[serde(skip)]
     pub secret_name: Option<String>,
+}
+
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyTransport {
+    pub proxy_protocol_version: Option<String>,
+}
+
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Transport {
+    pub protocol: Option<String>,
 }

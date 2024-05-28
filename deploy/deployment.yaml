@@ -5,7 +5,6 @@ metadata:
   labels:
     app.kubernetes.io/part-of: frp-operator
     app.kubernetes.io/name: frp-operator
-  namespace: frp-operator-system
 spec:
   replicas: 1
   revisionHistoryLimit: 0
@@ -27,6 +26,10 @@ spec:
         - name: frp-operator
           image: frp-operator
           imagePullPolicy: IfNotPresent
+          command: ['/app/frp-operator']
+          args: ['--server-addr', '192.168.100.1', '--server-port', '7000']
           env:
             - name: RUST_LOG
               value: frp_operator=debug
+            - name: AUTH_TOKEN
+              value: '12345678'

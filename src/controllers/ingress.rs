@@ -1,31 +1,31 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures_util::StreamExt;
-use json_patch::{PatchOperation, RemoveOperation};
 use k8s_openapi::api::{
-    apps::v1::Deployment,
-    core::v1::{ConfigMap, Secret, Service},
+    core::v1::{Secret, Service},
     networking::v1::{
         Ingress, IngressLoadBalancerIngress, IngressLoadBalancerStatus, IngressPortStatus,
         IngressStatus,
     },
 };
 use kube::{
-    api::{DeleteParams, ListParams, ObjectMeta, Patch, PatchParams},
+    api::{Patch, PatchParams},
     runtime::{controller::Action, finalizer, reflector, watcher, Controller, WatchStreamExt},
     Api, ResourceExt,
 };
 use log::{error, info, warn};
+use tokio::fs;
 
 use crate::{
-    config::{Proxy, ProxyConfig, ProxyPlugin},
     context::Context,
     error::Error,
+    frpc::{
+        self,
+        config::{Proxy, ProxyConfig, ProxyPlugin},
+    },
     OPERATOR_MANAGER,
 };
 use anyhow::anyhow;
-
-use super::{client::Client, configmap_from_proxy, patch_deployment, volumes_from_proxy};
 
 pub const INGRESS_FINALIZER: &str = "frp-operator.io/ingress-finalizer";
 
@@ -34,16 +34,12 @@ pub async fn proxy_from_ingress(
     client: &kube::Client,
     secrets: &mut Vec<Secret>,
 ) -> Result<ProxyConfig, Error> {
-    let mut proxy_config = ProxyConfig {
+    let mut config = ProxyConfig {
         name: ing.name_any(),
-        ..ProxyConfig::default()
+        proxies: vec![],
     };
 
-    let ns = ing
-        .metadata
-        .namespace
-        .clone()
-        .unwrap_or("default".to_string());
+    let ns: String = ing.namespace().unwrap_or("default".to_string());
     let svc_api: Api<Service> = Api::namespaced(client.clone(), &ns);
     let secret_api: Api<Secret> = Api::namespaced(client.clone(), &ns);
 
@@ -62,34 +58,31 @@ pub async fn proxy_from_ingress(
             let svc_spec = svc.spec.as_ref().unwrap();
             let port_name = backend_svc_port.name.as_ref();
             let port_number = backend_svc_port.number.as_ref();
-            let hostname = format!("{svc_name}.{ns}.svc.cluster.local");
 
-            let port = if let Some(_) = port_name {
-                svc_spec
-                    .ports
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .find(|port| port.name.as_ref() == port_name)
-                    .unwrap()
-                    .port as u16
-            } else if let Some(port) = port_number {
+            let port = if let Some(port) = port_number {
                 *port as u16
+            } else if let Some(port) = svc_spec
+                .ports
+                .iter()
+                .flatten()
+                .find(|port| port.name.as_ref() == port_name)
+            {
+                port.port as u16
             } else {
-                panic!("error find port");
+                return Err(anyhow!("failed to find port").into());
             };
 
             let locations = path.path.as_ref().map(|p| vec![p.to_owned()]);
 
-            proxy_config.proxies.push(Proxy {
-                name: ing.name_any(),
+            config.proxies.push(Proxy {
+                name: format!("ing-{}", ing.name_any()),
                 type_: "http".to_string(),
-                local_ip: Some(hostname),
+                local_ip: Some(format!("{svc_name}.{ns}.svc.cluster.local")),
                 local_port: Some(port),
                 custom_domains: custom_domains.to_owned(),
                 locations,
                 ..Proxy::default()
-            })
+            });
         }
     }
 
@@ -100,7 +93,7 @@ pub async fn proxy_from_ingress(
         }
     }
 
-    for proxy in proxy_config.proxies.iter_mut() {
+    for proxy in config.proxies.iter_mut() {
         for domain in proxy.custom_domains.as_ref().unwrap() {
             if let Some(secret_name) = tls_map.get(domain) {
                 let Ok(secret) = secret_api.get(secret_name).await else {
@@ -117,8 +110,8 @@ pub async fn proxy_from_ingress(
                         .as_ref()
                         .zip(proxy.local_port)
                         .map(|(ip, port)| format!("{ip}:{port}")),
-                    crt_path: Some(format!("/etc/frp/certs/{secret_name}/tls.crt")),
-                    key_path: Some(format!("/etc/frp/certs/{secret_name}/tls.key")),
+                    crt_path: Some(format!("/etc/ssl/certs/{secret_name}/tls.crt")),
+                    key_path: Some(format!("/etc/ssl/certs/{secret_name}/tls.key")),
                     secret_name: Some(secret_name.to_owned()),
                     ..ProxyPlugin::default()
                 });
@@ -130,111 +123,62 @@ pub async fn proxy_from_ingress(
         }
     }
 
-    Ok(proxy_config)
+    Ok(config)
 }
 
 async fn reconcile(obj: Arc<Ingress>, ctx: Arc<Context>) -> Result<Action, Error> {
     if !obj
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|ann| ann.get("kubernetes.io/ingress.class"))
+        .annotations()
+        .get("kubernetes.io/ingress.class")
         .or(obj
             .spec
             .as_ref()
             .and_then(|spec| spec.ingress_class_name.as_ref()))
         .map_or(false, |ic| ic == "frp")
     {
-        return Ok(Action::requeue(Duration::from_secs(60)));
+        return Ok(Action::await_change());
     }
 
     let obj_name = obj.name_any().to_owned();
-    let obj_spec = obj.spec.to_owned();
-
-    let client = ctx.client.clone();
-
-    let cli_api: Api<Client> = Api::all(client.clone());
-
-    let clis = cli_api.list(&ListParams::default().timeout(30)).await?;
-    let cli = clis
-        .iter()
-        .nth(0)
-        .ok_or_else(|| anyhow!("no client found"))?;
-
-    let cli_ns = cli.namespace().unwrap_or("default".to_string());
-    let configmap_api: Api<ConfigMap> = Api::namespaced(client.clone(), &cli_ns);
-
     let obj_ns = obj.namespace().unwrap_or("default".to_string());
 
-    let name = format!("config-proxy-{}", obj.name_any());
-    let cm_name = format!("frpc-{name}");
-
+    let client = ctx.client.clone();
     let ingress_api: Api<Ingress> = Api::namespaced(client.clone(), &obj_ns);
-    let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &cli_ns);
-    let secret_api: Api<Secret> = Api::namespaced(client.clone(), &cli_ns);
-
-    let dep: Deployment = deploy_api.get("frpc").await?;
 
     finalizer(&ingress_api, INGRESS_FINALIZER, obj, |event| async {
         match event {
             finalizer::Event::Apply(ing) => {
-                let oref = dep.owner_references().get(0).unwrap();
-
                 let mut secrets = vec![];
-                let proxy = proxy_from_ingress(&ing, &client, &mut secrets).await?;
+                let config = proxy_from_ingress(&ing, &client, &mut secrets).await?;
+
+                frpc::write_config_proxy_to_file(config).await?;
 
                 for secret in secrets {
-                    let secret = Secret {
-                        metadata: ObjectMeta {
-                            name: secret.metadata.name.clone(),
-                            namespace: Some(cli_ns.clone()),
-                            owner_references: Some(vec![oref.clone()]),
-                            ..ObjectMeta::default()
-                        },
-                        data: secret.data.clone(),
-                        ..Secret::default()
-                    };
-                    secret_api
-                        .patch(
-                            secret.name_any().as_str(),
-                            &PatchParams::apply(OPERATOR_MANAGER),
-                            &Patch::Apply(secret.to_owned()),
-                        )
-                        .await?;
+                    // copy secret data
+                    for (key, contents) in secret.data.iter().flatten() {
+                        let dir = format!("/etc/ssl/certs/{}/{}", obj_name, secret.name_any());
+                        let path = format!("{dir}/{key}");
+                        if fs::try_exists(&path).await? {
+                            continue;
+                        };
+                        fs::create_dir_all(dir).await?;
+                        fs::write(&path, &contents.0)
+                            .await
+                            .map_err(|err| anyhow!("failed to write secret {key}: {err}"))?;
+                    }
                 }
 
-                let cm = configmap_from_proxy(oref, &proxy, &cli_ns)?;
-                configmap_api
-                    .patch(
-                        &cm_name,
-                        &PatchParams::apply(OPERATOR_MANAGER),
-                        &Patch::Apply(&cm),
-                    )
-                    .await?;
-
-                let spec = dep
-                    .spec
-                    .as_ref()
-                    .and_then(|spec| spec.template.spec.as_ref())
-                    .unwrap();
-
-                let mut volumes = spec.volumes.clone().unwrap_or(vec![]);
-                let mut volume_mounts = spec
-                    .containers
-                    .get(0)
-                    .and_then(|c| c.volume_mounts.clone())
-                    .unwrap_or(vec![]);
-
-                volumes_from_proxy(&proxy, &mut volumes, &mut volume_mounts);
-
-                patch_deployment(&deploy_api, &volumes, &volume_mounts).await?;
+                frpc::reload().await?;
 
                 let mut ing = ingress_api.get_status(&obj_name).await?;
                 ing.status = Some(IngressStatus {
                     load_balancer: Some(IngressLoadBalancerStatus {
                         ingress: Some(vec![IngressLoadBalancerIngress {
                             // hostname: todo!(),
-                            ip: Some(cli.spec.server_addr.to_owned()),
+                            ip: frpc::read_config_from_file()
+                                .await
+                                .map(|config| config.server_addr)
+                                .ok(),
                             ports: Some(vec![IngressPortStatus {
                                 port: 80,
                                 protocol: "TCP".to_string(),
@@ -253,68 +197,25 @@ async fn reconcile(obj: Arc<Ingress>, ctx: Arc<Context>) -> Result<Action, Error
                     )
                     .await?;
             }
-            finalizer::Event::Cleanup(_ing) => {
-                // look for orphaned resources
-                let pod_spec = dep
+            finalizer::Event::Cleanup(ing) => {
+                frpc::remove_config_proxy_from_file(&ing.name_any()).await?;
+
+                for secret_name in ing
                     .spec
                     .as_ref()
-                    .and_then(|spec| spec.template.spec.as_ref())
-                    .unwrap();
-
-                let mut patches = vec![];
-                // find volume related to the ingress being cleanup
-                if let Some(index) = pod_spec
-                    .containers
-                    .get(0)
-                    .and_then(|c| c.volume_mounts.as_ref())
-                    .and_then(|vms| vms.iter().position(|vol| vol.name == name))
-                {
-                    patches.push(PatchOperation::Remove(RemoveOperation {
-                        path: format!("/spec/template/spec/volumes/{index}"),
-                    }));
-                }
-
-                // find volume mount related to the ingress being cleanup
-                if let Some(index) = pod_spec
-                    .volumes
-                    .as_ref()
-                    .and_then(|vols| vols.iter().position(|vol| vol.name == name))
-                {
-                    patches.push(PatchOperation::Remove(RemoveOperation {
-                        path: format!("/spec/template/spec/containers/0/volumeMounts/{index}"),
-                    }));
-                }
-
-                // patch deployment
-                deploy_api
-                    .patch(
-                        "frpc",
-                        &PatchParams::default(),
-                        &Patch::Json::<()>(json_patch::Patch(patches)),
-                    )
-                    .await?;
-
-                // delete config map for the ingress
-                configmap_api
-                    .delete(&cm_name, &DeleteParams::default())
-                    .await?;
-
-                // delete secrets for the ingress
-                for secret_name in obj_spec
-                    .as_ref()
-                    .and_then(|spec| spec.tls.as_ref())
-                    .into_iter()
+                    .and_then(|spec| spec.tls.clone())
+                    .iter()
                     .flatten()
-                    .filter_map(|tls| tls.secret_name.as_ref())
+                    .filter_map(|s| s.secret_name.clone())
                 {
-                    secret_api
-                        .delete(secret_name, &DeleteParams::default())
-                        .await?;
+                    fs::remove_dir_all(format!("/etc/ssl/certs/{secret_name}")).await?;
                 }
+
+                frpc::reload().await?;
             }
         }
 
-        Ok(Action::requeue(Duration::from_secs(60)))
+        Ok(Action::requeue(Duration::from_secs(3600)))
     })
     .await
     .map_err(|err| Error::FinalizerError(Box::new(err)))

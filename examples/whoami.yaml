@@ -25,8 +25,11 @@ metadata:
   name: whoami
   namespace: default
 spec:
+  # type: LoadBalancer
+  # loadBalancerClass: frp
   ports:
-    - port: 80
+    - port: 8080
+      targetPort: 80
       protocol: TCP
       name: http
   selector:
@@ -36,8 +39,8 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: whoami
-  # annotations:
-  #   cert-manager.io/cluster-issuer: 'selfsigned'
+# annotations:
+#   cert-manager.io/cluster-issuer: 'selfsigned'
 spec:
   ingressClassName: 'frp'
   rules:
@@ -51,7 +54,7 @@ spec:
                 name: whoami
                 port:
                   name: http
-  # tls:
-  #   - secretName: whoami-tls
-  #     hosts:
-  #       - whoami.example.com
+# tls:
+#   - secretName: whoami-tls
+#     hosts:
+#       - whoami.example.com
