@@ -1,6 +1,7 @@
 apiVersion: v2
 name: frp-operator
 description: FRP kubernetes operator
+home: https://github.com/mfadhlika/frp-operator
 
 # A chart can be either an 'application' or a 'library' chart.
 #
