@@ -32,4 +32,14 @@ spec:
             - name: RUST_LOG
               value: frp_operator=debug
             - name: AUTH_TOKEN
-              value: '12345678'
+              valueFrom:
+                secretKeyRef:
+                  name: frp-token
+                  key: token
+          resources:
+            limits:
+              cpu: 200m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 256Mi
