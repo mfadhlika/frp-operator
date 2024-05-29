@@ -113,7 +113,7 @@ async fn reconcile(obj: Arc<Service>, ctx: Arc<Context>) -> Result<Action, Error
                     .await?;
             }
             finalizer::Event::Cleanup(svc) => {
-                frpc::remove_config_proxy_from_file(&svc.name_any()).await?;
+                frpc::remove_config_proxy_file(&svc.name_any()).await?;
 
                 frpc::reload().await?;
             }

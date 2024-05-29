@@ -96,9 +96,7 @@ pub async fn proxy_from_ingress(
     for proxy in config.proxies.iter_mut() {
         for domain in proxy.custom_domains.as_ref().unwrap() {
             if let Some(secret_name) = tls_map.get(domain) {
-                let Ok(secret) = secret_api.get(secret_name).await else {
-                    continue;
-                };
+                let secret = secret_api.get(secret_name).await?;
 
                 secrets.push(secret);
 
@@ -156,7 +154,7 @@ async fn reconcile(obj: Arc<Ingress>, ctx: Arc<Context>) -> Result<Action, Error
                 for secret in secrets {
                     // copy secret data
                     for (key, contents) in secret.data.iter().flatten() {
-                        let dir = format!("/etc/ssl/certs/{}/{}", obj_name, secret.name_any());
+                        let dir = format!("/etc/ssl/certs/{}", secret.name_any());
                         let path = format!("{dir}/{key}");
                         if fs::try_exists(&path).await? {
                             continue;
@@ -198,7 +196,7 @@ async fn reconcile(obj: Arc<Ingress>, ctx: Arc<Context>) -> Result<Action, Error
                     .await?;
             }
             finalizer::Event::Cleanup(ing) => {
-                frpc::remove_config_proxy_from_file(&ing.name_any()).await?;
+                frpc::remove_config_proxy_file(&ing.name_any()).await?;
 
                 for secret_name in ing
                     .spec
