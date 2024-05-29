@@ -35,6 +35,8 @@ spec:
           command: ["/app/frp-operator"]
           args: ['--server-addr',  '{{ .Values.operator.serverAddr }}', --server-port, '{{ .Values.operator.serverPort }}']
           env:
+            - name: RUST_LOG
+              value: frp_operator={{ .Values.operator.logLevel }}
             - name: AUTH_TOKEN
               valueFrom:
                 secretKeyRef:

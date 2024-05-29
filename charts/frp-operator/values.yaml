@@ -21,6 +21,7 @@ operator:
     secret:
       name: ''
       key: ''
+  logLevel: error
 
 serviceAccount:
   # Specifies whether a service account should be created
