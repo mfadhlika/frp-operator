@@ -42,18 +42,6 @@ pub async fn write_config_to_file(config: ClientConfig) -> Result<(), Error> {
     Ok(())
 }
 
-pub async fn read_config_proxy_from_file(name: &str) -> Result<ProxyConfig, Error> {
-    let path = format!("{BASE_CONFIG_DIR}/proxy-{name}.toml");
-    let contents = fs::read_to_string(&path)
-        .await
-        .map_err(|err| anyhow!("failed to read config proxy {path}: {err}"))?;
-
-    let config =
-        toml::from_str(&contents).map_err(|err| anyhow!("failed to deserialize config: {err}"))?;
-
-    Ok(config)
-}
-
 pub async fn write_config_proxy_to_file(config: ProxyConfig) -> Result<(), Error> {
     let contents =
         toml::to_string(&config).map_err(|err| anyhow!("failed to serialize config: {err}"))?;
