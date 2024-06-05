@@ -2,6 +2,17 @@ apiVersion: v1
 entries:
   frp-operator:
   - apiVersion: v2
+    appVersion: 0.1.2
+    created: "2024-06-05T01:32:29.743427441Z"
+    description: FRP kubernetes operator
+    digest: 2611ab11a657f21789a27a6c9f5f9379a33b9cd4c4339fefccfb0b482eca7782
+    home: https://github.com/mfadhlika/frp-operator
+    name: frp-operator
+    type: application
+    urls:
+    - https://github.com/mfadhlika/frp-operator/releases/download/frp-operator-0.1.3/frp-operator-0.1.3.tgz
+    version: 0.1.3
+  - apiVersion: v2
     appVersion: 0.1.1
     created: "2024-05-29T15:08:56.039630357Z"
     description: FRP kubernetes operator
@@ -12,4 +23,4 @@ entries:
     urls:
     - frp-operator-0.1.2.tgz
     version: 0.1.2
-generated: "2024-05-29T15:08:56.039645295Z"
+generated: "2024-06-05T01:32:29.743439513Z"
