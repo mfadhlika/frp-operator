@@ -79,50 +79,36 @@ pub async fn remove_config_proxy_file(name: &str) -> Result<(), Error> {
 }
 
 pub async fn run(config: ClientConfig) -> Result<(), Error> {
-    let mut frpc_cmd = Command::new("/app/frpc");
-
-    frpc_cmd.stdout(Stdio::piped());
-    frpc_cmd.stderr(Stdio::piped());
-
     write_config_to_file(config).await?;
 
-    frpc_cmd.args(&["-c", ROOT_CONFIG_PATH]);
-
-    let child = frpc_cmd
+    let status = Command::new("/app/frpc")
+        .stdin(Stdio::null())
+        .args(&["-c", ROOT_CONFIG_PATH])
         .spawn()
-        .map_err(|err| anyhow!("failed to spawn frpc: {err}"))?;
-
-    let output = child
-        .wait_with_output()
+        .map_err(|err| anyhow!("failed to spawn frpc: {err}"))?
+        .wait()
         .await
         .map_err(|err| anyhow!("frpc output error: {err}"))?;
 
-    if !output.status.success() {
-        return Err(anyhow!("frpc output error: {output:?}").into());
+    if !status.success() {
+        return Err(anyhow!("frpc exit with status: {status:?}").into());
     }
 
     Ok(())
 }
 
 pub async fn reload() -> Result<(), Error> {
-    let mut frpc_cmd = Command::new("/app/frpc");
-
-    frpc_cmd.stdout(Stdio::piped());
-    frpc_cmd.stderr(Stdio::piped());
-
-    frpc_cmd.args(&["reload", "-c", ROOT_CONFIG_PATH]);
-
-    let child = frpc_cmd
+    let status = Command::new("/app/frpc")
+        .stdin(Stdio::null())
+        .args(&["reload", "-c", ROOT_CONFIG_PATH])
         .spawn()
-        .map_err(|err| anyhow!("failed to spawn frpc: {err}"))?;
-
-    let output = child
-        .wait_with_output()
+        .map_err(|err| anyhow!("failed to spawn frpc: {err}"))?
+        .wait()
         .await
         .map_err(|err| anyhow!("frpc output error: {err}"))?;
 
-    if !output.status.success() {
-        return Err(anyhow!("frpc output error: {output:?}").into());
+    if !status.success() {
+        return Err(anyhow!("frpc reload exit with status: {status:?}").into());
     }
 
     Ok(())
